@@ -1,0 +1,11 @@
+# Ignore all .scap files as they can be large and contain sensitive data
+*.scap
+
+# Keep analysis result files
+!*.json
+!*.yaml
+!*.md
+
+# Keep the directory structure
+!.gitignore
+!README.md

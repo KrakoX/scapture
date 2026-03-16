@@ -1,0 +1,163 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: scapture
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: scapture-deployment
+  namespace: scapture
+  labels:
+    app: sysdig
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: sysdig
+  template:
+    metadata:
+      labels:
+        app: sysdig
+    spec:
+      containers:
+      - name: sysdig
+        image: ubuntu:latest
+        command: ["/bin/bash"]
+        args:
+          - -c
+          - |
+            set -e
+
+            echo "Installing prerequisites..."
+            apt-get update
+            apt-get install -y wget curl ca-certificates jq build-essential linux-headers-generic clang llvm
+
+            echo "Detecting architecture..."
+            ARCH=$(uname -m)
+            echo "Architecture: $ARCH"
+            case $ARCH in
+              x86_64)
+                SYSDIG_ARCH="x86_64"
+                ;;
+              aarch64|arm64)
+                SYSDIG_ARCH="aarch64"
+                ;;
+              armv7l)
+                SYSDIG_ARCH="arm"
+                ;;
+              *)
+                echo "Unsupported architecture: $ARCH"
+                exit 1
+                ;;
+            esac
+
+            echo "Fetching sysdig version..."
+            LATEST_RELEASE_URL="https://api.github.com/repos/draios/sysdig/releases/latest"
+            SYSDIG_VERSION=$(curl -s "$LATEST_RELEASE_URL" | jq -r '.tag_name')
+
+            if [ "$SYSDIG_VERSION" = "null" ] || [ -z "$SYSDIG_VERSION" ]; then
+              echo "Failed to fetch, using fallback version"
+              SYSDIG_VERSION="0.40.1"
+            fi
+
+            echo "Version: $SYSDIG_VERSION"
+
+            echo "Checking package availability..."
+            DOWNLOAD_URL="https://github.com/draios/sysdig/releases/download/${SYSDIG_VERSION}/sysdig-${SYSDIG_VERSION}-${SYSDIG_ARCH}.deb"
+
+            if ! wget --spider "$DOWNLOAD_URL" 2>/dev/null; then
+              echo "Package not found, checking alternatives..."
+              ASSETS=$(curl -s "$LATEST_RELEASE_URL" | jq -r '.assets[].name' | grep '\.deb$')
+
+              if echo "$ASSETS" | grep -q "${SYSDIG_ARCH}\.deb"; then
+                PACKAGE_NAME=$(echo "$ASSETS" | grep "${SYSDIG_ARCH}\.deb" | head -n1)
+                DOWNLOAD_URL="https://github.com/draios/sysdig/releases/download/${SYSDIG_VERSION}/${PACKAGE_NAME}"
+              else
+                echo "No compatible package found"
+                exit 1
+              fi
+            fi
+
+            echo "Downloading sysdig..."
+            wget -O /tmp/sysdig.deb "$DOWNLOAD_URL"
+
+            echo "Installing sysdig..."
+            dpkg -i /tmp/sysdig.deb || true
+            apt-get install -f -y
+
+            echo "Verifying installation..."
+            sysdig --version
+
+            echo "Setting up eBPF probe..."
+            if ! sysdig -B --help >/dev/null 2>&1; then
+              echo "BPF support not available"
+            else
+              echo "Setting up probe..."
+              timeout 30s sysdig -B -c fdcount_by fd.name 2>/dev/null || echo "Probe setup attempted"
+            fi
+
+            echo "Sysdig installation completed successfully"
+            tail -f /dev/null
+        securityContext:
+          privileged: true
+          capabilities:
+            add:
+            - SYS_ADMIN
+            - SYS_PTRACE
+        volumeMounts:
+        - name: proc
+          mountPath: /host/proc
+          readOnly: true
+        - name: boot
+          mountPath: /host/boot
+          readOnly: true
+        - name: modules
+          mountPath: /host/lib/modules
+          readOnly: true
+        - name: usr
+          mountPath: /host/usr
+          readOnly: true
+        - name: dev
+          mountPath: /host/dev
+        - name: sys
+          mountPath: /host/sys
+          readOnly: true
+      volumes:
+      - name: proc
+        hostPath:
+          path: /proc
+      - name: boot
+        hostPath:
+          path: /boot
+      - name: modules
+        hostPath:
+          path: /lib/modules
+      - name: usr
+        hostPath:
+          path: /usr
+      - name: dev
+        hostPath:
+          path: /dev
+      - name: sys
+        hostPath:
+          path: /sys
+      hostNetwork: true
+      hostPID: true
+      restartPolicy: Always
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: sysdig-service
+  namespace: scapture
+  labels:
+    app: sysdig
+spec:
+  selector:
+    app: sysdig
+  ports:
+  - port: 8080
+    targetPort: 8080
+    name: http
+  type: ClusterIP

@@ -1,0 +1,19 @@
+# Claude Code local config
+.claude/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Capture files (may be large and contain sensitive data)
+scaps/*.scap
+
+# Temp
+/tmp/
