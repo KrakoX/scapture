@@ -33,11 +33,7 @@ cleanup() {
 
     if [[ -n "${CAPTURE_PID:-}" ]]; then
         echo "Stopping any running capture processes..."
-        if [[ "${PLATFORM:-}" == "docker" ]]; then
-            docker exec "$DOCKER_CONTAINER_NAME" pkill sysdig 2>/dev/null || true
-        else
-            kubectl exec "deployment/$DEPLOYMENT_NAME" -n "$NAMESPACE" -- pkill sysdig 2>/dev/null || true
-        fi
+        container_exec pkill sysdig 2>/dev/null || true
         wait "$CAPTURE_PID" 2>/dev/null || true
     fi
 
@@ -127,21 +123,17 @@ ensure_scaps_directory() {
     fi
 }
 
-# Execute a command inside the sysdig container
+# Execute a command inside the sysdig container; pass -i as first arg to attach stdin
 container_exec() {
-    if [[ "$PLATFORM" == "kubernetes" ]]; then
-        kubectl exec "deployment/$DEPLOYMENT_NAME" -n "$NAMESPACE" -- "$@"
-    else
-        docker exec "$DOCKER_CONTAINER_NAME" "$@"
+    local stdin_flag=""
+    if [[ "${1:-}" == "-i" ]]; then
+        stdin_flag="-i"
+        shift
     fi
-}
-
-# Execute a command inside the sysdig container with stdin
-container_exec_i() {
     if [[ "$PLATFORM" == "kubernetes" ]]; then
-        kubectl exec -i "deployment/$DEPLOYMENT_NAME" -n "$NAMESPACE" -- "$@"
+        kubectl exec $stdin_flag "deployment/$DEPLOYMENT_NAME" -n "$NAMESPACE" -- "$@"
     else
-        docker exec -i "$DOCKER_CONTAINER_NAME" "$@"
+        docker exec $stdin_flag "$DOCKER_CONTAINER_NAME" "$@"
     fi
 }
 
@@ -253,7 +245,7 @@ wait_for_deployment() {
             exit 1
         fi
     else
-        if docker inspect --format='{{.State.Running}}' "$DOCKER_CONTAINER_NAME" 2>/dev/null | grep -q true; then
+        if [[ "$(docker inspect --format='{{.State.Running}}' "$DOCKER_CONTAINER_NAME" 2>/dev/null)" == "true" ]]; then
             echo -e "${GREEN}Reusing existing container${NC}"
             return 0
         fi
@@ -312,7 +304,7 @@ get_package_requirements() {
         local apt_command="apt-get update -q && apt-get install -y -- ${quoted_packages}"
         echo -e "${BLUE}Executing: ${apt_command}${NC}"
 
-        container_exec bash -c "
+        if container_exec bash -c "
             echo 'Waiting for apt to be available...'
             timeout=60
             elapsed=0
@@ -326,9 +318,7 @@ get_package_requirements() {
             done
             echo 'Apt available, proceeding...'
             ${apt_command}
-        "
-
-        if [[ $? -eq 0 ]]; then
+        "; then
             echo -e "${GREEN}Packages installed successfully${NC}"
         else
             echo -e "${RED}X Package installation failed${NC}"
@@ -427,7 +417,7 @@ set -o pipefail
 
 $USER_COMMANDS"
 
-    echo "$script_content" | container_exec_i bash -c "
+    echo "$script_content" | container_exec -i bash -c "
         script_file=\"/tmp/user_\$(date +%s)_\$\$.sh\"
         cat > \"\$script_file\"
         chmod +x \"\$script_file\"
@@ -733,19 +723,13 @@ perform_file_analysis() {
 
         # Count and categorize
         local temp_count
-        temp_count=$(echo "$created_files" | wc -l)
+        temp_count=$(echo "$created_files" | wc -l | tr -d ' ')
         local shared_libs
-        shared_libs=$(echo "$created_files" | grep -c "\.so" 2>/dev/null || echo "0")
+        shared_libs=$(echo "$created_files" | grep -c "\.so" 2>/dev/null || true)
         local scripts
-        scripts=$(echo "$created_files" | grep -cE "\.(sh|py|pl|rb)$" 2>/dev/null || echo "0")
+        scripts=$(echo "$created_files" | grep -cE "\.(sh|py|pl|rb)$" 2>/dev/null || true)
         local temp_files
-        temp_files=$(echo "$created_files" | grep -c "/tmp/" 2>/dev/null || echo "0")
-
-        # Clean up any potential whitespace/newlines
-        temp_count=$(echo "$temp_count" | tr -d '\n\r ')
-        shared_libs=$(echo "$shared_libs" | tr -d '\n\r ')
-        scripts=$(echo "$scripts" | tr -d '\n\r ')
-        temp_files=$(echo "$temp_files" | tr -d '\n\r ')
+        temp_files=$(echo "$created_files" | grep -c "/tmp/" 2>/dev/null || true)
 
         echo -e "\n  Summary: $temp_count files created"
         [[ $shared_libs -gt 0 ]] && echo -e "    Shared libraries: $shared_libs"
